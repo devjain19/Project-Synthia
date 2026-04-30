@@ -12,9 +12,12 @@ $GGUF = Join-Path $Models "gguf"
 $OllamaModels = Join-Path $Models "ollama_data"
 $ModelFiles = Join-Path $Models "modelfiles"
 $Data = Join-Path $ROOT "chat_data"
+$PortablePythonRoot = Join-Path $ROOT "python-embed"
+$PortablePythonZip = Join-Path $Bin "python-3.11.4-embed-amd64.zip"
+$PortablePythonExe = Join-Path $PortablePythonRoot "python.exe"
 
 function Ensure-Dirs {
-    $dirs = @($Shared, $Bin, $Models, $GGUF, $OllamaModels, $ModelFiles, $Data)
+    $dirs = @($Shared, $Bin, $Models, $GGUF, $OllamaModels, $ModelFiles, $Data, $PortablePythonRoot)
     foreach ($d in $dirs) {
         if (-not (Test-Path $d)) {
             Write-Host "Creating: $d"
@@ -38,87 +41,86 @@ function Download-File($url, $out) {
 }
 
 function Install-Embeddable-Python {
-    param($arch = "amd64")
+    param([string]$ZipPath, [string]$TargetPath)
+
     $pyVersion = '3.11.4'
-    if ($arch -eq 'amd64') {
-        $zipName = "python-$pyVersion-embed-amd64.zip"
-    } else {
-        $zipName = "python-$pyVersion-embed-win32.zip"
-    }
-
+    $zipName = Split-Path $ZipPath -Leaf
     $url = "https://www.python.org/ftp/python/$pyVersion/$zipName"
-    $outZip = Join-Path $Bin $zipName
-    if (-not (Test-Path $outZip)) {
-        Download-File $url $outZip
+
+    if (-not (Test-Path $ZipPath)) {
+        Download-File $url $ZipPath
     } else {
-        Write-Host "Embeddable archive already present: $outZip"
+        Write-Host "Embeddable archive already present: $ZipPath"
     }
 
-    $target = Join-Path $ROOT "python-portable"
-    if (-not (Test-Path $target)) { New-Item -ItemType Directory -Path $target | Out-Null }
+    if (-not (Test-Path $TargetPath)) { New-Item -ItemType Directory -Path $TargetPath | Out-Null }
 
-    Write-Host "Extracting to $target"
-    Expand-Archive -Path $outZip -DestinationPath $target -Force
+    Write-Host "Extracting portable Python to $TargetPath"
+    Expand-Archive -Path $ZipPath -DestinationPath $TargetPath -Force
 
-    $pyExe = Get-ChildItem -Path $target -Recurse -Filter python.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    $pthFile = Get-ChildItem -Path $TargetPath -Filter '*._pth' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($pthFile) {
+        $pthContent = Get-Content -Path $pthFile.FullName
+        if ($pthContent -notcontains 'import site') {
+            Add-Content -Path $pthFile.FullName -Value 'import site'
+        }
+    }
+
+    $pyExe = Get-ChildItem -Path $TargetPath -Recurse -Filter python.exe -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $pyExe) { throw 'python.exe not found in extracted embeddable archive' }
-    $pyPath = $pyExe.FullName
 
     $getpip = Join-Path $Bin 'get-pip.py'
     if (-not (Test-Path $getpip)) { Download-File 'https://bootstrap.pypa.io/get-pip.py' $getpip }
 
-    Write-Host "Installing pip into portable python ($pyPath)"
-    & "$pyPath" "$getpip"
+    Write-Host "Installing pip into portable python ($($pyExe.FullName))"
+    & $pyExe.FullName $getpip
 
-    Write-Host "Installing recommended Python packages (requests)"
+    Write-Host "Installing bundled Python dependencies"
     try {
-        & "$pyPath" -m pip install --no-warn-script-location requests
+        & $pyExe.FullName -m pip install --no-warn-script-location requests
     } catch {
-        Write-Host 'pip install failed or already present'
+        Write-Host 'pip install failed or was already satisfied'
     }
 
-    return $pyPath
+    return $pyExe.FullName
 }
 
 function Ensure-Python {
-    Write-Host "Checking for existing Python..."
-    $py = Get-Command python -ErrorAction SilentlyContinue
-    if ($py) {
-        try {
-            $ver = & python -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>&1
-            Write-Host "Found system Python: $ver"
-            return (Get-Command python).Source
-        } catch {
-            Write-Host "System python exists but failed to execute: $_"
-        }
-    }
-
-    if ($NonInteractive) { $choice = 'Y' } else { $choice = Read-Host "No python found in PATH. Download embeddable Python and install (Y/n)?" }
-    if ($choice -in @('Y', 'y', '', $null)) {
-        return Install-Embeddable-Python -arch 'amd64'
-    }
-    throw 'Python not available'
+    Write-Host "Installing/refreshing portable Python in $PortablePythonRoot"
+    return Install-Embeddable-Python -ZipPath $PortablePythonZip -TargetPath $PortablePythonRoot
 }
 
 function Maybe-Install-Ollama {
     $installer = Join-Path $ScriptRoot 'install-local-ollama.bat'
     if (Test-Path $installer) {
-        if ($NonInteractive) { $run = 'Y' } else { $run = Read-Host "Found install-local-ollama.bat. Run it now to install Ollama (Y/n)?" }
-        if ($run -in @('Y','y','','Yes')) {
-            Write-Host "Running $installer"
-            Start-Process -FilePath cmd -ArgumentList '/c', "$installer" -NoNewWindow -Wait
-        }
+        Write-Host "Running $installer"
+        Start-Process -FilePath cmd -ArgumentList @('/c', ('"{0}"' -f $installer)) -NoNewWindow -Wait
     } else {
         Write-Host "No local Ollama installer found at $installer. You can place ollama binary at Shared/bin or run install-local-ollama.bat manually."
     }
+}
+
+function Verify-Setup {
+    $pyExe = $PortablePythonExe
+    if (-not (Test-Path $pyExe)) { throw "Portable Python not found at $pyExe" }
+
+    $ollamaExe = Join-Path $Bin 'ollama-windows.exe'
+    if (-not (Test-Path $ollamaExe)) { throw "Ollama executable not found at $ollamaExe" }
+
+    Write-Host "Verifying portable Python..."
+    & $pyExe -c "import sys; print(sys.executable); print('.'.join(map(str, sys.version_info[:3])))"
+
+    Write-Host "Verifying Ollama executable..."
+    & $ollamaExe --version
 }
 
 try {
     Ensure-Dirs
     $pythonExe = Ensure-Python
     Maybe-Install-Ollama
+    Verify-Setup
     Write-Host "Setup complete."
-    Write-Host "Run scripts\start-synthia.bat to launch the app."
+    Write-Host "Run scripts\run-portable.bat or scripts\launch-with-embedded-python.bat to launch the app."
     if ($pythonExe) {
         Write-Host "Portable/system Python ready: $pythonExe"
     }
