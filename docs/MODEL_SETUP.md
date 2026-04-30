@@ -13,7 +13,7 @@ When imported, Synthia will:
 3. Run `ollama create <name> -f <Modelfile>`
 4. Save metadata into `chat_data/model_registry.json`
 
-## 4) Recommended model sources
+## 2) Recommended model sources
 
 - Ollama registry: https://ollama.com/library
 - Hugging Face GGUF collections: https://huggingface.co/models?library=gguf
@@ -26,7 +26,7 @@ Recommended Synthia models:
 
 Important: use direct file URLs that resolve to a `.gguf` file.
 
-## 5) Model routing behavior
+## 3) Model routing behavior
 
 - Lite chat uses the selected Lite model and warms it on startup.
 - Heavy chat uses Heavy model by default.
