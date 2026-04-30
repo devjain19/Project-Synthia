@@ -1,48 +1,43 @@
 # Synthia
 
-Synthia is a portable offline AI app with a browser UI, a local Python backend, and an optional terminal UI.
+Synthia is a portable offline AI assistant with:
 
-## Files to upload
+- a browser-based GUI (`synthia.html` + `backend.py`)
+- local model execution through Ollama
+- optional terminal client (`scripts/synthia-terminal.py`)
 
-- `backend.py`
-- `synthia.html`
-- `start-synthia.bat`
-- `assets/`
-- `docs/`
-- `scripts/`
-- `README.md`
-- `.gitignore`
+## Quick Start
 
-## Do not upload
-
-- `chat_data/`
-- `Shared/models/ollama_data/`
-- `Shared/models/gguf/`
-- `Shared/models/modelfiles/`
-- `Shared/bin/ollama-windows.exe`
-- `python-portable/`
-- `.venv/`
-
-## Run locally
-
-GUI backend:
+### 1) Start the GUI backend
 
 ```cmd
 start-synthia.bat
 ```
 
-Terminal UI:
+Then open `http://127.0.0.1:3333` in your browser.
+
+### 2) Start the terminal client (optional)
 
 ```cmd
 scripts\start-terminal-synthia.bat
 ```
 
-Portable setup:
+## Setup and Model Guides
 
-```powershell
-.\scripts\setup-portable.ps1
-```
+- Portable setup: `docs/README_SETUP.md`
+- Offline model import and routing: `docs/MODEL_SETUP.md`
 
-## GitHub upload
+## Project Layout
 
-Use the commands below after you create a GitHub repository and replace the URL with your repo URL.
+- `backend.py`: local API server and Ollama integration
+- `synthia.html`: GUI frontend
+- `scripts/`: setup and launch scripts (GUI + terminal)
+- `assets/`: GUI logos/assets
+- `docs/`: user documentation
+- `chat_data/`: local runtime chat/settings storage
+- `Shared/`: local Ollama binary and model data
+
+## Notes
+
+- Synthia is intended to run locally/offline.
+- Runtime data (chat history, imported models, Ollama cache) is machine-local.
