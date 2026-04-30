@@ -3,15 +3,11 @@ setlocal
 title Synthia Portable Backend
 
 set "ROOT=%~dp0"
-set "PYTHON_CMD=python"
 set "OLLAMA_EXE=%ROOT%Shared\bin\ollama-windows.exe"
 set "OLLAMA_HOST=http://127.0.0.1:11434"
 set "OLLAMA_MODELS=%ROOT%Shared\models\ollama_data"
 set "OLLAMA_ORIGINS=*"
-
-if exist "%ROOT%Shared\python\python.exe" (
-    set "PYTHON_CMD=%ROOT%Shared\python\python.exe"
-)
+set "RUN_PORTABLE=%ROOT%scripts\run-portable.bat"
 
 if exist "%OLLAMA_EXE%" (
     curl -s http://127.0.0.1:11434/api/tags >nul 2>&1
@@ -22,7 +18,12 @@ if exist "%OLLAMA_EXE%" (
 )
 
 echo Starting Synthia backend...
-%PYTHON_CMD% "%ROOT%backend.py"
+if exist "%RUN_PORTABLE%" (
+    call "%RUN_PORTABLE%" "%ROOT%backend.py"
+) else (
+    echo run-portable.bat not found at %RUN_PORTABLE%
+    exit /b 1
+)
 
 pause
 

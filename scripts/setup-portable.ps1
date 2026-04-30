@@ -31,9 +31,11 @@ function Cmd-Exists($name) {
 }
 
 function Download-File($url, $out) {
-    if (Cmd-Exists curl) {
-        Write-Host "Downloading $url -> $out (using curl)"
-        & curl -L --retry 5 --retry-delay 3 -o "$out" "$url"
+    # Prefer an actual curl.exe if present (PowerShell 'curl' is often an alias to Invoke-WebRequest)
+    $curlExe = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curlExe -and $curlExe.CommandType -eq 'Application') {
+        Write-Host "Downloading $url -> $out (using curl.exe)"
+        & "$($curlExe.Source)" -L --retry 5 --retry-delay 3 -o "$out" "$url"
     } else {
         Write-Host "Downloading $url -> $out (using Invoke-WebRequest)"
         Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -TimeoutSec 300
