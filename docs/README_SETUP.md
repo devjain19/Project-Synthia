@@ -20,11 +20,7 @@ PowerShell (recommended):
 .\scripts\setup-portable.ps1 -NonInteractive
 ```
 
-Then run the backend using the portable Python that was installed into `python-embed/`:
-
-```cmd
-scripts\run-portable.bat backend.py
-```
+Then run the Synthia using start-synthia.bat inside the .\
 
 Notes:
 
