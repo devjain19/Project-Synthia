@@ -38,6 +38,11 @@ When imported, Synthia will:
 - Hugging Face GGUF collections: https://huggingface.co/models?library=gguf
 - Bartowski GGUF repos (popular quantized models)
 
+Recommended Synthia models:
+
+- Lite: [Gemma 2](https://huggingface.co/bartowski/gemma-2-2b-it-abliterated-GGUF/resolve/main/gemma-2-2b-it-abliterated-Q4_K_M.gguf) for fast everyday chat and lightweight local use.
+- Heavy: [Gemma 4](https://huggingface.co/llmfan46/gemma-4-E4B-it-ultra-uncensored-heretic-GGUF/resolve/main/gemma-4-E4B-it-ultra-uncensored-heretic-Q4_K_M.gguf) for larger, more capable local responses.
+
 Important: use direct file URLs that resolve to a `.gguf` file.
 
 ## 5) Model routing behavior
