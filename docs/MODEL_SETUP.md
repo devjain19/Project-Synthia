@@ -1,27 +1,8 @@
 # Synthia Offline Model Setup
 
-## 1) Install local Ollama into this folder
+## 1) Download any GGUF model from URL
 
-Run `scripts/install-local-ollama.bat`.
-
-This installs the Ollama executable to:
-- `Shared/bin/ollama-windows.exe`
-
-And creates the portable model cache folder:
-- `Shared/models/ollama_data`
-
-## 2) Launch Synthia
-
-Run `scripts/start-synthia.bat`.
-
-The launcher will:
-- start local Ollama from `Shared/bin/ollama-windows.exe` if present
-- wait for Ollama API to respond
-- start `backend.py`
-
-## 3) Download any GGUF model from URL
-
-Open Synthia -> Settings and use **Import GGUF model**:
+Open Synthia from ./start-synthia.bat -> Settings and use **Import GGUF model**:
 - `GGUF URL`: direct link ending in `.gguf`
 - `Model name`: local Ollama model name (example: `qwen3-4b-local`)
 - `Model type`: `light/lite`, `heavy`, `video`, `image`, `pdf`, `code`, `pentest`, `research`, or `other`
