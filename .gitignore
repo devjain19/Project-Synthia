@@ -1,0 +1,29 @@
+# Python caches and local environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+python-portable/
+
+# VS Code and local tooling
+.vscode/
+
+# Runtime and generated data
+chat_data/
+Shared/models/ollama_data/
+Shared/models/gguf/
+Shared/models/modelfiles/
+Shared/bin/ollama-windows.exe
+Shared/ollama-windows-amd64.zip
+Shared/_ollama_extract/
+
+# Temporary files
+*.log
+tmp_*.json
+*.tmp
+*.bak
+
+# OS clutter
+Thumbs.db
+.DS_Store
