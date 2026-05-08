@@ -19,6 +19,7 @@ import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -66,6 +67,9 @@ DEFAULT_SETTINGS = {
         "structured answers and ask clarifying questions when needed."
     ),
 }
+
+IMPORT_JOBS: dict[str, dict] = {}
+IMPORT_JOBS_LOCK = threading.Lock()
 
 DEFAULT_CHATS = {
     "lite": [
@@ -169,10 +173,31 @@ def build_modelfile_text(gguf_path: Path) -> str:
     return f"FROM {path_text}\n\nPARAMETER num_ctx 4096\n"
 
 
-def fetch_file(url: str, target_path: Path) -> None:
+def fetch_file(url: str, target_path: Path, progress_callback=None) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "Synthia-Portable/1.0"})
     with urllib.request.urlopen(request, timeout=300.0) as response, target_path.open("wb") as out_file:
-        shutil.copyfileobj(response, out_file)
+        total_bytes = response.headers.get("Content-Length")
+        try:
+            total_bytes_int = int(total_bytes) if total_bytes is not None else None
+        except Exception:
+            total_bytes_int = None
+
+        downloaded = 0
+        started_at = time.monotonic()
+        chunk_size = 1024 * 1024
+        while True:
+            chunk = response.read(chunk_size)
+            if not chunk:
+                break
+            out_file.write(chunk)
+            downloaded += len(chunk)
+            if progress_callback:
+                elapsed = max(time.monotonic() - started_at, 0.001)
+                progress_callback(downloaded, total_bytes_int, elapsed)
+
+        if progress_callback:
+            elapsed = max(time.monotonic() - started_at, 0.001)
+            progress_callback(downloaded, total_bytes_int, elapsed)
 
 
 def create_ollama_model(model_name: str, modelfile_path: Path) -> None:
@@ -196,7 +221,7 @@ def create_ollama_model(model_name: str, modelfile_path: Path) -> None:
         raise RuntimeError(stderr.strip())
 
 
-def import_gguf_model(gguf_url: str, model_name: str, model_type: str) -> dict:
+def import_gguf_model(gguf_url: str, model_name: str, model_type: str, progress_callback=None) -> dict:
     parsed = urllib.parse.urlparse(gguf_url)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("GGUF URL must start with http:// or https://")
@@ -215,7 +240,7 @@ def import_gguf_model(gguf_url: str, model_name: str, model_type: str) -> dict:
     gguf_path = GGUF_DIR / filename
     modelfile_path = MODELFILES_DIR / f"{model_name}.Modelfile"
 
-    fetch_file(gguf_url, gguf_path)
+    fetch_file(gguf_url, gguf_path, progress_callback=progress_callback)
     modelfile_path.write_text(build_modelfile_text(gguf_path), encoding="utf-8")
     create_ollama_model(model_name, modelfile_path)
 
@@ -248,6 +273,70 @@ def import_gguf_model(gguf_url: str, model_name: str, model_type: str) -> dict:
         "ggufFile": str(gguf_path),
         "settings": settings,
     }
+
+
+def make_import_job_payload(job_id: str) -> dict:
+    with IMPORT_JOBS_LOCK:
+        job = dict(IMPORT_JOBS.get(job_id) or {})
+    if not job:
+        return {"ok": False, "error": "job not found"}
+    return {"ok": True, "job": job}
+
+
+def _update_import_job(job_id: str, **updates) -> None:
+    with IMPORT_JOBS_LOCK:
+        job = IMPORT_JOBS.get(job_id)
+        if not job:
+            return
+        job.update(updates)
+
+
+def _run_import_job(job_id: str, gguf_url: str, model_name: str, model_type: str) -> None:
+    started_at = time.monotonic()
+
+    def progress_callback(downloaded_bytes: int, total_bytes: int | None, elapsed_seconds: float) -> None:
+        percent = None
+        eta_seconds = None
+        speed_bps = None
+        if total_bytes and total_bytes > 0:
+            percent = min(100.0, (downloaded_bytes / total_bytes) * 100.0)
+            if elapsed_seconds > 0 and downloaded_bytes > 0:
+                speed_bps = downloaded_bytes / elapsed_seconds
+                remaining = max(total_bytes - downloaded_bytes, 0)
+                eta_seconds = remaining / speed_bps if speed_bps > 0 else None
+        elif elapsed_seconds > 0 and downloaded_bytes > 0:
+            speed_bps = downloaded_bytes / elapsed_seconds
+
+        _update_import_job(
+            job_id,
+            state="downloading",
+            downloadedBytes=downloaded_bytes,
+            totalBytes=total_bytes,
+            percent=percent,
+            speedBytesPerSecond=speed_bps,
+            etaSeconds=eta_seconds,
+            elapsedSeconds=max(time.monotonic() - started_at, 0.0),
+        )
+
+    try:
+        _update_import_job(job_id, state="starting", message="Preparing download...", startedAt=datetime.now(timezone.utc).isoformat())
+        result = import_gguf_model(gguf_url, model_name, model_type, progress_callback=progress_callback)
+        _update_import_job(
+            job_id,
+            state="completed",
+            message="Import complete.",
+            finishedAt=datetime.now(timezone.utc).isoformat(),
+            result=result,
+            models=discover_models(),
+        )
+    except Exception as exc:
+        _update_import_job(
+            job_id,
+            state="failed",
+            message=str(exc),
+            finishedAt=datetime.now(timezone.utc).isoformat(),
+            error=str(exc),
+        )
 
 
 def delete_imported_model(model_name: str) -> dict:
@@ -578,6 +667,18 @@ class SynthiaHandler(BaseHTTPRequestHandler):
         if path == "/api/model-registry":
             self._send_json(200, {"items": get_registry(), "types": MODEL_TYPES})
             return
+        if path == "/api/model/import/status":
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            job_id = str((query.get("jobId") or [""])[0]).strip()
+            if not job_id:
+                self._send_json(400, {"ok": False, "error": "jobId is required"})
+                return
+            payload = make_import_job_payload(job_id)
+            if not payload.get("ok"):
+                self._send_json(404, payload)
+                return
+            self._send_json(200, payload)
+            return
         if path == "/api/health":
             self._send_json(
                 200,
@@ -735,8 +836,29 @@ class SynthiaHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "error": "ggufUrl and modelName are required"})
                 return
 
-            result = import_gguf_model(gguf_url, model_name, model_type)
-            self._send_json(200, {"ok": True, "result": result, "models": discover_models()})
+            job_id = uuid.uuid4().hex
+            with IMPORT_JOBS_LOCK:
+                IMPORT_JOBS[job_id] = {
+                    "jobId": job_id,
+                    "state": "queued",
+                    "message": "Queued for import.",
+                    "downloadedBytes": 0,
+                    "totalBytes": None,
+                    "percent": None,
+                    "speedBytesPerSecond": None,
+                    "etaSeconds": None,
+                    "startedAt": None,
+                    "finishedAt": None,
+                    "result": None,
+                    "error": None,
+                }
+
+            threading.Thread(
+                target=_run_import_job,
+                args=(job_id, gguf_url, model_name, model_type),
+                daemon=True,
+            ).start()
+            self._send_json(202, {"ok": True, "jobId": job_id})
         except Exception as exc:
             self._send_json(500, {"ok": False, "error": str(exc)})
 

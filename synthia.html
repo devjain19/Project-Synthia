@@ -765,6 +765,33 @@ body {
   border-radius: 3px;
   animation: load 2.4s cubic-bezier(.4,0,.2,1) forwards;
 }
+.import-progress .pfill {
+  width: 0%;
+  animation: none;
+  transition: width 180ms linear;
+}
+.import-progress {
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.import-progress.show {
+  display: flex;
+}
+.import-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-soft);
+}
+.import-progress-meta strong {
+  color: var(--text);
+  font-weight: 700;
+}
 @keyframes load { 0%{width:0} 55%{width:68%} 100%{width:100%} }
 .x-btn {
   position: absolute; top: 14px; right: 14px; z-index: 2;
@@ -1195,9 +1222,17 @@ body {
           </select>
         </div>
         <div class="settings-actions">
-          <button class="btn-p" type="button" onclick="importModelFromGguf()">Download and import model</button>
+          <button class="btn-p" id="import-model-btn" type="button" onclick="importModelFromGguf()">Download and import model</button>
         </div>
         <div class="settings-note" id="import-status">No import started.</div>
+        <div class="import-progress" id="import-progress">
+          <div class="pbar"><div class="pfill" id="import-progress-fill"></div></div>
+          <div class="import-progress-meta" id="import-progress-meta">
+            <span><strong>0%</strong> waiting to start</span>
+            <span>0 B / 0 B</span>
+            <span>ETA: --</span>
+          </div>
+        </div>
       </div>
 
       <div class="setting-group">
@@ -1256,6 +1291,10 @@ const ggufUrlInput = document.getElementById('gguf-url-input');
 const ggufNameInput = document.getElementById('gguf-name-input');
 const ggufTypeSelect = document.getElementById('gguf-type-select');
 const importStatus = document.getElementById('import-status');
+const importProgress = document.getElementById('import-progress');
+const importProgressFill = document.getElementById('import-progress-fill');
+const importProgressMeta = document.getElementById('import-progress-meta');
+const importModelBtn = document.getElementById('import-model-btn');
 const modelRegistryList = document.getElementById('model-registry-list');
 
 const profileSelects = {
@@ -1277,6 +1316,8 @@ const appState = {
   activeSession: { lite: null, heavy: null },
   models: [],
   registry: [],
+  importJobId: null,
+  importPollTimer: null,
 };
 
 const HISTORY_STORAGE_KEY = 'synthia-gui-chat-history-v1';
@@ -1312,6 +1353,111 @@ function normalizeSessionMode(session) {
   if (!session) return 'lite';
   if (session.tile) return `${session.mode} / ${session.tile}`;
   return session.mode || 'lite';
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '--';
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / (1024 ** index);
+  return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '--';
+  const total = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+  if (minutes > 0) return `${minutes}m ${String(secs).padStart(2, '0')}s`;
+  return `${secs}s`;
+}
+
+function showImportProgress(active) {
+  if (!importProgress) return;
+  importProgress.classList.toggle('show', Boolean(active));
+}
+
+function updateImportProgress(job) {
+  if (!job) return;
+  const totalBytes = Number(job.totalBytes);
+  const downloadedBytes = Number(job.downloadedBytes || 0);
+  const percent = Number.isFinite(job.percent) ? job.percent : (totalBytes > 0 ? (downloadedBytes / totalBytes) * 100 : 0);
+  const safePercent = Math.max(0, Math.min(100, percent || 0));
+
+  showImportProgress(job.state === 'queued' || job.state === 'starting' || job.state === 'downloading');
+  if (importProgressFill) {
+    importProgressFill.style.width = `${safePercent}%`;
+  }
+  if (importProgressMeta) {
+    const percentLabel = `${safePercent.toFixed(safePercent >= 10 ? 0 : 1)}%`;
+    const sizeLabel = totalBytes > 0 ? `${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}` : `${formatBytes(downloadedBytes)} / unknown`;
+    const etaLabel = job.state === 'downloading' && Number.isFinite(job.etaSeconds) ? formatDuration(job.etaSeconds) : '--';
+    importProgressMeta.innerHTML = `<span><strong>${percentLabel}</strong> ${job.message || 'Downloading model...'}</span><span>${sizeLabel}</span><span>ETA: ${etaLabel}</span>`;
+  }
+  if (importStatus) {
+    const stateLabel = job.state ? job.state.replace(/_/g, ' ') : 'working';
+    importStatus.textContent = `${stateLabel.charAt(0).toUpperCase()}${stateLabel.slice(1)}: ${job.message || ''}`.trim();
+  }
+}
+
+function stopImportPolling() {
+  if (appState.importPollTimer) {
+    clearInterval(appState.importPollTimer);
+    appState.importPollTimer = null;
+  }
+}
+
+function setImportUiBusy(isBusy) {
+  if (importModelBtn) importModelBtn.disabled = isBusy;
+}
+
+async function pollImportJob(jobId) {
+  if (!jobId) return;
+  stopImportPolling();
+
+  const tick = async () => {
+    try {
+      const response = await fetch(`/api/model/import/status?jobId=${encodeURIComponent(jobId)}`);
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || 'Could not read import status');
+      }
+
+      const job = data.job || {};
+      updateImportProgress(job);
+
+      if (job.state === 'completed') {
+        stopImportPolling();
+        setImportUiBusy(false);
+        showImportProgress(false);
+        appState.settings = job.result?.settings || appState.settings;
+        importStatus.textContent = `Imported ${job.result?.name || 'model'} as ${job.result?.type || 'other'}.`;
+        await refreshModels();
+        await saveSettings(appState.settings);
+        return;
+      }
+
+      if (job.state === 'failed') {
+        stopImportPolling();
+        setImportUiBusy(false);
+        showImportProgress(false);
+        importStatus.textContent = `Import failed: ${job.error || job.message || 'unknown error'}`;
+        return;
+      }
+
+      appState.importPollTimer = setTimeout(tick, 1000);
+    } catch (error) {
+      stopImportPolling();
+      setImportUiBusy(false);
+      showImportProgress(false);
+      importStatus.textContent = `Import failed: ${error.message}`;
+    }
+  };
+
+  await tick();
 }
 
 function loadChatHistory() {
@@ -1702,6 +1848,12 @@ async function importModelFromGguf() {
   }
 
   importStatus.textContent = 'Downloading and importing model... this may take several minutes.';
+  setImportUiBusy(true);
+  showImportProgress(true);
+  if (importProgressFill) importProgressFill.style.width = '0%';
+  if (importProgressMeta) {
+    importProgressMeta.innerHTML = '<span><strong>0%</strong> waiting for server response</span><span>0 B / unknown</span><span>ETA: --</span>';
+  }
   try {
     const response = await fetch('/api/model/import', {
       method: 'POST',
@@ -1712,12 +1864,16 @@ async function importModelFromGguf() {
     if (!response.ok || !data.ok) {
       throw new Error(data.error || 'Import failed');
     }
-    appState.settings = data.result.settings || appState.settings;
-    importStatus.textContent = `Imported ${data.result.name} as ${data.result.type}.`;
+    appState.importJobId = data.jobId || null;
+    if (!appState.importJobId) {
+      throw new Error('Import job did not start');
+    }
+    await pollImportJob(appState.importJobId);
     ggufNameInput.value = '';
-    await refreshModels();
-    await saveSettings(appState.settings);
   } catch (error) {
+    stopImportPolling();
+    setImportUiBusy(false);
+    showImportProgress(false);
     importStatus.textContent = `Import failed: ${error.message}`;
   }
 }
