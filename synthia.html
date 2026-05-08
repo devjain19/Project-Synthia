@@ -1476,6 +1476,33 @@ function saveChatHistory() {
   } catch (_) {}
 }
 
+function normalizeMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+  return messages
+    .filter((entry) => entry && (entry.role === 'user' || entry.role === 'assistant'))
+    .map((entry) => ({ role: entry.role, content: String(entry.content || '') }));
+}
+
+function getChatsPayload() {
+  const liteMessages = normalizeMessages(appState.activeSession.lite?.messages || appState.history.lite || []);
+  const heavyMessages = normalizeMessages(appState.activeSession.heavy?.messages || appState.history.heavy || []);
+  return {
+    lite: liteMessages,
+    heavy: heavyMessages,
+    savedSessions: Array.isArray(appState.chatHistory) ? appState.chatHistory : [],
+  };
+}
+
+async function persistChats() {
+  try {
+    await fetch('/api/chats', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(getChatsPayload()),
+    });
+  } catch (_) {}
+}
+
 function commitSession(mode) {
   const session = appState.activeSession[mode];
   if (!session || !Array.isArray(session.messages) || session.messages.length === 0) return;
@@ -1486,11 +1513,13 @@ function commitSession(mode) {
 
   const finished = {
     ...session,
+    messages: normalizeMessages(session.messages),
     completedAt: nowIso(),
     preview: preview.slice(0, 240),
   };
   appState.chatHistory = [finished, ...appState.chatHistory.filter((item) => item.id !== finished.id)];
   saveChatHistory();
+  persistChats();
 }
 
 function guessSessionModel(mode) {
@@ -1512,6 +1541,32 @@ function startFreshSession(mode, tile = null, commitCurrent = true) {
   appState.history[mode] = [];
   if (mode === 'lite') {
     liteMsgs.innerHTML = LITE_WELCOME_HTML;
+  } else {
+    heavyMsgs.innerHTML = '';
+  }
+}
+
+function restoreModeSession(mode, messages, modelName = '') {
+  const normalized = normalizeMessages(messages);
+  appState.activeSession[mode] = {
+    id: createSessionId(),
+    mode,
+    tile: null,
+    startedAt: nowIso(),
+    model: modelName || guessSessionModel(mode),
+    messages: normalized,
+  };
+  appState.history[mode] = normalized.slice(-24);
+  if (mode === 'lite') {
+    if (normalized.length) {
+      renderLiteHistory(normalized);
+    } else {
+      liteMsgs.innerHTML = LITE_WELCOME_HTML;
+    }
+    return;
+  }
+  if (normalized.length) {
+    renderHeavyHistory(normalized);
   } else {
     heavyMsgs.innerHTML = '';
   }
@@ -1550,6 +1605,9 @@ function renderHistoryPopup() {
   items.forEach((session) => {
     const item = document.createElement('div');
     item.className = 'history-item';
+    item.style.cursor = 'pointer';
+    item.title = 'Click to continue this chat';
+    item.onclick = () => loadSavedSession(session.id);
 
     const top = document.createElement('div');
     top.className = 'history-item-top';
@@ -1576,7 +1634,10 @@ function renderHistoryPopup() {
     del.type = 'button';
     del.className = 'btn-small btn-small-danger';
     del.textContent = 'Delete';
-    del.onclick = () => deleteSavedSession(session.id);
+    del.onclick = (event) => {
+      event.stopPropagation();
+      deleteSavedSession(session.id);
+    };
     actions.appendChild(del);
 
     top.appendChild(main);
@@ -1611,9 +1672,73 @@ function updateHistoryPopupSize() {
 }
 
 function deleteSavedSession(sessionId) {
+  const removed = appState.chatHistory.find((item) => item.id === sessionId);
   appState.chatHistory = appState.chatHistory.filter((item) => item.id !== sessionId);
+
+  if (removed && removed.mode && appState.activeSession[removed.mode]?.id === sessionId) {
+    startFreshSession(removed.mode, removed.mode === 'heavy' ? appState.curTile : null, false);
+  }
+
   saveChatHistory();
+  persistChats();
   renderHistoryPopup();
+}
+
+async function applySessionModel(mode, modelName) {
+  if (!modelName) return;
+
+  if (mode === 'lite') {
+    appState.settings.liteModel = modelName;
+    if (liteModelSelect) liteModelSelect.value = modelName;
+    updateActiveSessionModel('lite', modelName);
+    await saveSettings({ liteModel: modelName });
+    return;
+  }
+
+  if (mode === 'heavy') {
+    appState.settings.heavyModel = modelName;
+    if (heavyModelSelect) heavyModelSelect.value = modelName;
+    updateActiveSessionModel('heavy', modelName);
+    await saveSettings({ heavyModel: modelName });
+  }
+}
+
+async function loadSavedSession(sessionId) {
+  const session = appState.chatHistory.find((item) => item.id === sessionId);
+  if (!session) return;
+
+  const mode = session.mode === 'heavy' ? 'heavy' : 'lite';
+  const messages = normalizeMessages(session.messages || []);
+
+  appState.activeSession[mode] = {
+    id: session.id || createSessionId(),
+    mode,
+    tile: session.tile || null,
+    startedAt: session.startedAt || nowIso(),
+    model: session.model || guessSessionModel(mode),
+    messages,
+  };
+  appState.history[mode] = messages.slice(-24);
+
+  if (mode === 'lite') {
+    if (messages.length) {
+      renderLiteHistory(messages);
+    } else {
+      liteMsgs.innerHTML = LITE_WELCOME_HTML;
+    }
+  } else {
+    document.getElementById('hcw').classList.add('on');
+    renderHeavyHistory(messages);
+  }
+
+  if (session.model) {
+    await applySessionModel(mode, session.model);
+  }
+
+  persistChats();
+  if (historyPopup.classList.contains('on')) {
+    historyPopup.classList.remove('on');
+  }
 }
 
 function newChat(mode) {
@@ -1663,6 +1788,7 @@ window.addEventListener('beforeunload', () => {
   commitSession('lite');
   commitSession('heavy');
   saveChatHistory();
+  persistChats();
 });
 
 function applyLogo(isDark) {
@@ -2155,11 +2281,15 @@ async function bootstrap() {
     Object.keys(profileSelects).forEach((key) => {
       profileSelects[key].setAttribute('title', `${key} task model`);
     });
-    appState.chatHistory = loadChatHistory();
+    const backendChats = data.chats && typeof data.chats === 'object' ? data.chats : {};
+    appState.chatHistory = Array.isArray(backendChats.savedSessions)
+      ? backendChats.savedSessions
+      : loadChatHistory();
     appState.registry = Array.isArray(data.registry) ? data.registry : appState.registry;
-    startFreshSession('lite', null, false);
-    startFreshSession('heavy', null, false);
+    restoreModeSession('lite', backendChats.lite, appState.settings.liteModel || '');
+    restoreModeSession('heavy', backendChats.heavy, appState.settings.heavyModel || '');
     renderHistoryPopup();
+    persistChats();
     await refreshModels();
   } catch (error) {
     if (savedTheme === 'dark') renderTheme('dark');

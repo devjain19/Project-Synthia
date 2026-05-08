@@ -79,6 +79,7 @@ DEFAULT_CHATS = {
         }
     ],
     "heavy": [],
+    "savedSessions": [],
 }
 
 TILE_PROMPTS = {
